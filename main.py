@@ -116,4 +116,8 @@ if __name__ == "__main__":
         print("WARNING: LIVEKIT_API_SECRET is not set")
         print("Please configure it in the Laravel dashboard (Third Party Settings)")
 
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+    cli.run_app(WorkerOptions(
+        entrypoint_fnc=entrypoint,
+        job_memory_warn_mb=float(os.getenv("LIVEKIT_JOB_MEMORY_WARN_MB", "1500")),
+        job_memory_limit_mb=float(os.getenv("LIVEKIT_JOB_MEMORY_LIMIT_MB", "2048")),
+    ))

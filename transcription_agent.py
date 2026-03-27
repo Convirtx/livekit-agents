@@ -101,6 +101,7 @@ class TranscriptionAgent:
         self.configured_language = deepgram_language  # Store for reference
         self.participants: dict[str, dict] = {}
         self.stt_tasks: dict[str, asyncio.Task] = {}
+        self._http_client: Optional[httpx.AsyncClient] = None
 
     def _fetch_config_from_api(self) -> dict:
         """
@@ -200,8 +201,32 @@ class TranscriptionAgent:
             participant: rtc.RemoteParticipant,
         ):
             if track.kind == rtc.TrackKind.KIND_AUDIO:
-                task = asyncio.create_task(self._transcribe_audio(track, participant))
-                self.stt_tasks[participant.identity] = task
+                # Ensure participant is in our dict (handles "unknown participant" race)
+                if participant.identity not in self.participants:
+                    self.participants[participant.identity] = {
+                        "name": participant.name or participant.identity,
+                        "identity": participant.identity,
+                    }
+                # Use composite key to avoid duplicate STT streams per track
+                task_key = f"{participant.identity}:{track.sid}"
+                # Cancel any existing task for this track before creating new one
+                if task_key in self.stt_tasks:
+                    old_task = self.stt_tasks.pop(task_key)
+                    old_task.cancel()
+                task = asyncio.create_task(self._transcribe_audio(track, participant, task_key))
+                self.stt_tasks[task_key] = task
+
+        @self.room.on("track_unsubscribed")
+        def on_track_unsubscribed(
+            track: rtc.Track,
+            publication: rtc.TrackPublication,
+            participant: rtc.RemoteParticipant,
+        ):
+            if track.kind == rtc.TrackKind.KIND_AUDIO:
+                task_key = f"{participant.identity}:{track.sid}"
+                if task_key in self.stt_tasks:
+                    task = self.stt_tasks.pop(task_key)
+                    task.cancel()
 
         # Handle participant updates
         @self.room.on("participant_connected")
@@ -215,12 +240,13 @@ class TranscriptionAgent:
         def on_participant_disconnected(participant: rtc.RemoteParticipant):
             if participant.identity in self.participants:
                 del self.participants[participant.identity]
-            # Cancel STT task
-            if participant.identity in self.stt_tasks:
-                task = self.stt_tasks.pop(participant.identity)
+            # Cancel all STT tasks for this participant (all tracks)
+            keys_to_remove = [k for k in self.stt_tasks if k.startswith(f"{participant.identity}:")]
+            for key in keys_to_remove:
+                task = self.stt_tasks.pop(key)
                 task.cancel()
 
-    async def _transcribe_audio(self, track: rtc.Track, participant: rtc.RemoteParticipant):
+    async def _transcribe_audio(self, track: rtc.Track, participant: rtc.RemoteParticipant, task_key: str):
         """Transcribe audio from a track"""
         # Create STT stream for this participant
         # Language is configured at STT initialization, not at stream level
@@ -253,7 +279,8 @@ class TranscriptionAgent:
                     if not stream_closed_immediately:
                         # Use AudioStream to get frames
                         # AudioStream returns AudioFrameEvent objects, not AudioFrame directly
-                        audio_stream = rtc.AudioStream(track)
+                        # capacity=60 bounds frame backlog (~2 sec at 30 fps) to limit memory growth
+                        audio_stream = rtc.AudioStream(track, capacity=60)
                         async for frame_event in audio_stream:
                             # Check if stream is closed before pushing frames
                             if hasattr(stt_stream, 'closed') and stt_stream.closed:
@@ -280,9 +307,14 @@ class TranscriptionAgent:
                         # Stream closed immediately - don't try to process audio
                         print(f"[TranscriptionAgent] Skipping audio processing - stream was closed immediately")
                 except Exception as e:
-                    print(f"[TranscriptionAgent] Error feeding audio to STT: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    error_msg = str(e).lower()
+                    # Handle track no longer available (e.g. "could not find published track")
+                    if "track" in error_msg or "published" in error_msg:
+                        print(f"[TranscriptionAgent] Track no longer available: {e}")
+                    else:
+                        print(f"[TranscriptionAgent] Error feeding audio to STT: {e}")
+                        import traceback
+                        traceback.print_exc()
                 finally:
                     # Only call end_input if stream is not already closed
                     try:
@@ -397,6 +429,12 @@ class TranscriptionAgent:
             import traceback
             traceback.print_exc()
 
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        """Reuse a single AsyncClient for webhook calls to reduce memory allocations."""
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=5.0)
+        return self._http_client
+
     async def _send_transcription(
         self,
         participant: rtc.RemoteParticipant,
@@ -430,13 +468,13 @@ class TranscriptionAgent:
                 "confidence": confidence,
             }
 
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self.webhook_url,
-                    json=payload,
-                    timeout=5.0,
-                )
-                response.raise_for_status()
+            client = await self._get_http_client()
+            response = await client.post(
+                self.webhook_url,
+                json=payload,
+                timeout=5.0,
+            )
+            response.raise_for_status()
         except Exception as e:
             print(f"Error sending transcription to webhook: {e}")
 
