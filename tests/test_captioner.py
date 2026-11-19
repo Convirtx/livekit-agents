@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DEEPGRAM_API_KEY", "test")
 
 import sink as sink_module  # noqa: E402
-from captioner import Dispatch, TrackTranscriber, deepgram_language  # noqa: E402
+from captioner import Dispatch, TrackTranscriber, deepgram_language, speaker_user_id  # noqa: E402
 from livekit.agents import stt  # noqa: E402
 from sink import TranscriptSink  # noqa: E402
 
@@ -47,6 +47,13 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual("en-US", deepgram_language("en"))
         self.assertEqual("en-US", deepgram_language(""))
         self.assertEqual("ar-EG", deepgram_language("ar-EG"))
+
+    def test_speaker_user_id_prefers_the_identity(self):
+        # The attribute is editable by the participant, the identity is not.
+        self.assertEqual("12", speaker_user_id("u12-ab3k9z", {"user_id": "99"}))
+        self.assertEqual("7", speaker_user_id("speaker-Ann-7", {"user_id": "7"}))
+        self.assertIsNone(speaker_user_id("agent-AJ_1", {}))
+        self.assertIsNone(speaker_user_id("Ann", {"user_id": "drop table"}))
 
 
 class WallClockTest(unittest.TestCase):

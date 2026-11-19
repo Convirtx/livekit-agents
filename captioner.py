@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 
@@ -74,6 +75,22 @@ class Dispatch:
             callback_url=str(data["callback_url"]),
             callback_token=str(data["callback_token"]),
         )
+
+
+_IDENTITY_USER = re.compile(r"^u(\d+)-[a-z0-9]+$")
+
+
+def speaker_user_id(identity: str, attributes: dict[str, str]) -> str | None:
+    """
+    The site user behind a participant. Identities are `u{userId}-{nonce}` (minted by the
+    site, so they can't be changed from the browser). Participants may edit their own
+    attributes, so the `user_id` attribute is only a fallback for older identities.
+    """
+    match = _IDENTITY_USER.match(identity)
+    if match:
+        return match.group(1)
+    value = attributes.get("user_id")
+    return value if value and value.isdigit() else None
 
 
 def deepgram_language(code: str) -> str:
@@ -196,7 +213,7 @@ class TrackTranscriber:
                 "id": self._segment_id,
                 "participant_identity": self._participant.identity,
                 "participant_name": self._participant.name or self._participant.identity,
-                "user_id": self._participant.attributes.get("user_id"),
+                "user_id": speaker_user_id(self._participant.identity, self._participant.attributes),
                 "track_sid": self._track_sid,
                 "text": text,
                 "language": str(alt.language) if alt.language else None,
