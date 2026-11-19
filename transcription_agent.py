@@ -468,10 +468,16 @@ class TranscriptionAgent:
                 "confidence": confidence,
             }
 
+            headers = {}
+            webhook_secret = os.getenv("LIVEKIT_TRANSCRIPTION_WEBHOOK_SECRET", "")
+            if webhook_secret:
+                headers["X-Transcription-Secret"] = webhook_secret
+
             client = await self._get_http_client()
             response = await client.post(
                 self.webhook_url,
                 json=payload,
+                headers=headers,
                 timeout=5.0,
             )
             response.raise_for_status()
