@@ -1,31 +1,16 @@
 #!/bin/bash
-# Convenience script to run the transcription agent
-
+# Run the captioner locally (hot reload). Needs a .env with LIVEKIT_* and DEEPGRAM_API_KEY.
+set -e
 cd "$(dirname "$0")"
 
-# Activate virtual environment
-if [ ! -d "venv" ]; then
-    echo "Error: Virtual environment not found. Please run ./setup.sh first"
+if [ ! -d venv ]; then
+    echo "Virtual environment not found. Run ./setup.sh first."
     exit 1
 fi
 
 source venv/bin/activate
-
-# Load APP_URL from Laravel .env if it exists
-if [ -f "../.env" ]; then
-    source load_env.sh
-fi
-
-# Set default APP_URL if not set
-if [ -z "$APP_URL" ]; then
-    export APP_URL="http://localhost:8000"
-    echo "Using default APP_URL: $APP_URL"
-fi
-
-# Run the agent
-echo "Starting LiveKit Transcription Agent..."
-echo "APP_URL: $APP_URL"
-echo "Agent will fetch configuration from: ${APP_URL}/api/livekit/agent/config"
-echo ""
+set -a
+[ -f .env ] && source .env
+set +a
 
 python main.py dev

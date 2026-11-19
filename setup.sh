@@ -1,9 +1,9 @@
 #!/bin/bash
-# Setup script for LiveKit Transcription Agents
+# Setup script for the cx-captioner agent
 
 set -e
 
-echo "Setting up LiveKit Transcription Agents..."
+echo "Setting up cx-captioner..."
 
 # Check if python3-venv is installed
 if ! dpkg -l | grep -q python3.*-venv; then
