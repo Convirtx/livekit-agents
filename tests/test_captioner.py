@@ -13,7 +13,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DEEPGRAM_API_KEY", "test")
 
 import sink as sink_module  # noqa: E402
-from captioner import Dispatch, TrackTranscriber, caption_languages, deepgram_language, speaker_user_id  # noqa: E402
+import captioner  # noqa: E402
+from captioner import Dispatch, RoomCaptioner, TrackTranscriber, caption_languages, deepgram_language, speaker_user_id  # noqa: E402
+from livekit import rtc  # noqa: E402
 from livekit.agents import stt  # noqa: E402
 from sink import TranscriptSink  # noqa: E402
 
@@ -159,6 +161,100 @@ class SinkTest(unittest.IsolatedAsyncioTestCase):
         await s.aclose()
 
         self.assertEqual(["SG_9"], [seg["id"] for seg in self.requests[-1][1]["segments"]])
+
+
+class FakePublication(rtc.RemoteTrackPublication):
+    def __init__(self, sid, kind=rtc.TrackKind.KIND_AUDIO, source=rtc.TrackSource.SOURCE_MICROPHONE):
+        self._sid, self._kind, self._source, self._muted, self._track = sid, kind, source, False, object()
+
+    sid = property(lambda self: self._sid)
+    kind = property(lambda self: self._kind)
+    source = property(lambda self: self._source)
+    muted = property(lambda self: self._muted)
+    track = property(lambda self: self._track)
+
+
+class FakeParticipant(rtc.RemoteParticipant):
+    def __init__(self, identity, *publications, kind=rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD):
+        self._identity, self._kind = identity, kind
+        self._pubs = {p.sid: p for p in publications}
+
+    identity = property(lambda self: self._identity)
+    kind = property(lambda self: self._kind)
+    track_publications = property(lambda self: self._pubs)
+
+
+class FakeTranscriber:
+    opened: list[str] = []
+    closed: list[str] = []
+
+    def __init__(self, *, track_sid, **_):
+        self.sid = track_sid
+        FakeTranscriber.opened.append(track_sid)
+
+    async def aclose(self):
+        FakeTranscriber.closed.append(self.sid)
+
+
+class RoomCaptionerTest(unittest.IsolatedAsyncioTestCase):
+    """Which microphones get a Deepgram stream: one per unmuted person, closed on mute."""
+
+    def setUp(self):
+        FakeTranscriber.opened, FakeTranscriber.closed = [], []
+        self._real = captioner.TrackTranscriber
+        captioner.TrackTranscriber = FakeTranscriber
+        c = RoomCaptioner.__new__(RoomCaptioner)
+        c._room, c._sink, c._engine, c._transcribers, c._closing = None, None, None, {}, set()
+        self.c = c
+
+    def tearDown(self):
+        captioner.TrackTranscriber = self._real
+
+    async def settle(self):
+        await asyncio.gather(*list(self.c._closing))
+
+    async def test_mute_closes_the_stream_and_unmute_opens_a_new_one(self):
+        mic = FakePublication("TR_mic")
+        ann = FakeParticipant("u1-abc", mic)
+
+        self.c._on_track_subscribed(mic.track, mic, ann)
+        self.assertEqual(["TR_mic"], list(self.c._transcribers))
+
+        mic._muted = True
+        self.c._on_track_muted(ann, mic)
+        await self.settle()
+        self.assertEqual({}, self.c._transcribers)
+        self.assertEqual(["TR_mic"], FakeTranscriber.closed)
+
+        mic._muted = False
+        self.c._on_track_unmuted(ann, mic)
+        self.assertEqual(["TR_mic", "TR_mic"], FakeTranscriber.opened)
+        self.assertIn("TR_mic", self.c._transcribers)
+
+    async def test_a_track_subscribed_while_muted_gets_no_stream(self):
+        mic = FakePublication("TR_mic")
+        mic._muted = True
+        self.c._on_track_subscribed(mic.track, mic, FakeParticipant("u1-abc", mic))
+        self.assertEqual([], FakeTranscriber.opened)
+
+    async def test_cameras_and_agents_are_ignored(self):
+        cam = FakePublication("TR_cam", kind=rtc.TrackKind.KIND_VIDEO, source=rtc.TrackSource.SOURCE_CAMERA)
+        self.c._on_track_subscribed(cam.track, cam, FakeParticipant("u1-abc", cam))
+        bot = FakePublication("TR_bot")
+        self.c._on_track_subscribed(bot.track, bot, FakeParticipant("agent-1", bot, kind=rtc.ParticipantKind.PARTICIPANT_KIND_AGENT))
+        self.assertEqual([], FakeTranscriber.opened)
+
+    async def test_leaving_closes_every_stream_and_the_room_cap_holds(self):
+        mics = [FakePublication(f"TR_{i}") for i in range(captioner.MAX_STREAMS + 2)]
+        people = [FakeParticipant(f"u{i}-abc", m) for i, m in enumerate(mics)]
+        for m, p in zip(mics, people):
+            self.c._on_track_subscribed(m.track, m, p)
+        self.assertEqual(captioner.MAX_STREAMS, len(self.c._transcribers))
+
+        self.c._on_participant_disconnected(people[0])
+        await self.settle()
+        self.assertEqual(["TR_0"], FakeTranscriber.closed)
+        self.assertNotIn("TR_0", self.c._transcribers)
 
 
 if __name__ == "__main__":

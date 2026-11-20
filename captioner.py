@@ -34,6 +34,15 @@ from sink import TranscriptSink
 logger = logging.getLogger("cx-captioner")
 
 SAMPLE_RATE = 16000
+# Audio is read in 100 ms frames, not the SDK's 10 ms default. One Python loop serves every
+# microphone in the room; at 10 ms it fell behind at about 12 open mics (the native queue
+# overflowed and dropped audio, as at the qaf demo). Load test, 60 s per row:
+#   10 ms, 20 mics: 142% CPU, overflowing, 2 caption batches
+#   50 ms, 20 mics: 90%, no overflow, 46 batches; 25 mics: overflowing again
+#  100 ms, 25 mics: 88%, no overflow, 47 batches
+# Deepgram takes 20-100 ms chunks and waits 300 ms of silence to end a line, so the
+# extra delay is not noticeable.
+FRAME_MS = int(os.getenv("CAPTIONER_FRAME_MS", "100"))
 # Interim captions are replaced in place, so sending more than ~5 a second per speaker
 # only adds traffic to every viewer.
 INTERIM_MIN_INTERVAL = 0.2
@@ -161,7 +170,7 @@ class TrackTranscriber:
         await utils.aio.cancel_and_wait(self._task)
 
     async def _run(self) -> None:
-        audio = rtc.AudioStream(self._track, sample_rate=SAMPLE_RATE, num_channels=1)
+        audio = rtc.AudioStream(self._track, sample_rate=SAMPLE_RATE, num_channels=1, frame_size_ms=FRAME_MS)
         stream = self._engine.stream()
         reader = asyncio.create_task(self._read(stream), name=f"captions-read-{self._track_sid}")
         log = {"participant": self._participant.identity, "track": self._track_sid}
