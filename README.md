@@ -1,13 +1,13 @@
 # cx-captioner
 
-Live captions for ConvirtX live sessions and the VIP area. One worker deployment serves
-every tenant on the shared LiveKit project.
+Live captions for ConvirtX live sessions and the VIP area. Each tenant site has its own
+captioner (Dokploy app `{slug}-captioner`), which runs with that site's settings.
 
 ## How it works
 
 1. A tenant site goes live (`EventAgendaService::startLive` or the VIP start-live). Its
    `LiveRoomService` creates the room (`{tenant}-s{id}` or `{tenant}-vip`) and, when
-   captions are on, **dispatches this agent by name** (`cx-captioner`) with metadata:
+   captions are on, **dispatches this agent by name** (`cx-captioner-{slug}`) with metadata:
 
    ```json
    {"v":1,"tenant":"qaf","room":"qaf-s10","kind":"session","event_id":10,"language":"en",
@@ -43,10 +43,37 @@ cp .env.example .env       # LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, D
 ./run.sh                   # python main.py dev (hot reload)
 ```
 
-Production (Dokploy app `livekitagent`): build the `Dockerfile`, set the same env vars,
-and the container runs `python main.py start`. The worker answers health checks on
-`:8081/`. A redeploy drains: rooms already being captioned keep their job for up to
-`CAPTIONER_DRAIN_TIMEOUT` seconds.
+### Production: one captioner per site
+
+The platform creates it with the site (`InstanceProvisioner`), or for an existing site with
+`php artisan platform:captioner <slug>` / `--template` on the platform app. Its env holds no
+credentials:
+
+| Env | Value |
+|---|---|
+| `CAPTIONER_CONFIG_URL` | `http://<site service>/api/livekit/captioner/config` (internal address) |
+| `CAPTIONER_TOKEN` | same value as the site's `LIVEKIT_CAPTIONER_TOKEN` |
+| `CAPTIONER_TENANT` | the site's slug (for logs) |
+| `CAPTIONER_IDLE_PROCESSES` | warm processes, 1 |
+
+The container runs `supervisor.py`. It reads the site's LiveKit URL, key and secret, Deepgram
+key and agent name (`cx-captioner-{slug}`) from Settings › Third parties, then starts the
+worker (`main.py start`) with them. Settings rarely change, so the site says when they do:
+saving Settings › Third parties calls `POST :8081/reload` (with the token), and the supervisor
+reads them at once. As a safety net it also reads them every `CAPTIONER_CONFIG_POLL_SECONDS`
+(300), and whenever the worker's state changes. Workers are checked locally every 5 s, and a
+crashed one restarts without calling the site. When the settings change, a new worker starts at once and the old one drains: rooms it is
+captioning keep their captions for up to `CAPTIONER_DRAIN_TIMEOUT` seconds. If transcription
+is turned off, no worker runs. Every read reports the worker's state (`starting`,
+`running`, `failed` with LiveKit's reason, `idle`), which the site shows on Settings ›
+Diagnostics › Live captions agent.
+
+The settings endpoint answers only with the token, and only to internal calls (no proxy
+headers), because it returns the LiveKit secret.
+
+The supervisor answers the container health check on `GET :8081/` and the site's `POST :8081/reload`; workers use 8082/8083.
+Without `CAPTIONER_CONFIG_URL` it simply runs `main.py start` with the env (the old shared
+agent, local runs).
 
 ## Test
 
@@ -54,7 +81,9 @@ and the container runs `python main.py start`. The worker answers health checks 
 python -m unittest discover -s tests
 ```
 
-These tests run offline: dispatch parsing, timestamps, batching, retry and flush on close.
+These tests run offline: dispatch parsing, timestamps, batching, retry and flush on close,
+and the supervisor (start, reload on change or when the site asks, drain, idle, crash backoff,
+local checks between reads, unreachable site).
 For a live check, start a session with captions on, unmute, speak, and confirm both the
 captions in the room and rows in `event_agenda_transcriptions` with a `segment_id`.
 
@@ -62,6 +91,7 @@ captions in the room and rows in `event_agenda_transcriptions` with a `segment_i
 
 | File | What it does |
 |---|---|
+| `supervisor.py` | Reads the site's settings, runs the worker with them, restarts it when they change |
 | `main.py` | Worker setup, dispatch validation, job entrypoint |
 | `captioner.py` | Per-room manager and the per-microphone transcriber |
 | `sink.py` | Batched, retried posts of final segments to the tenant site |

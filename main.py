@@ -4,10 +4,13 @@ cx-captioner: the ConvirtX live-captions worker.
 
 It joins a room only when a tenant site dispatches it by name (explicit dispatch, see
 LiveRoomService in the Laravel app). The dispatch metadata says which tenant and room it
-serves and where to post transcripts, so one deployment serves every tenant on the
-shared LiveKit project.
+serves and where to post transcripts.
 
-Env: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, DEEPGRAM_API_KEY.
+In production each tenant site has its own captioner, and supervisor.py starts this worker
+with that site's settings (LiveKit project, Deepgram key, agent name). Run on its own, it
+reads them from the env.
+
+Env: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, DEEPGRAM_API_KEY, CAPTIONER_AGENT_NAME.
 Run: `python main.py start` (production) or `python main.py dev` (local, hot reload).
 """
 
@@ -34,6 +37,10 @@ server = AgentServer(
     job_memory_limit_mb=float(os.getenv("CAPTIONER_JOB_MEMORY_LIMIT_MB", "1024")),
     # On redeploy, running rooms keep their captioner for up to this long.
     drain_timeout=int(os.getenv("CAPTIONER_DRAIN_TIMEOUT", "600")),
+    # Health check port. The supervisor gives each worker it starts its own port.
+    port=int(os.environ["CAPTIONER_WORKER_PORT"])
+    if os.getenv("CAPTIONER_WORKER_PORT")
+    else AgentServer._default_port,
 )
 
 
