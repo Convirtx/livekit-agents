@@ -39,6 +39,23 @@ SAMPLE_RATE = 16000
 INTERIM_MIN_INTERVAL = 0.2
 # Upper bound on simultaneous Deepgram streams in one room (one per unmuted mic).
 MAX_STREAMS = int(os.getenv("CAPTIONER_MAX_STREAMS_PER_ROOM", "25"))
+# On final captions: when the line started (epoch ms), so the transcript tab can order
+# live lines with the stored ones.
+ATTRIBUTE_START_MS = "cx.start_ms"
+# Participant attribute a viewer sets to the caption language(s) they want, comma separated.
+CAPTION_LANGUAGE_ATTRIBUTE = "cap_lang"
+_LANGUAGE = re.compile(r"^[a-z]{2,3}$")
+
+
+def caption_languages(room: rtc.Room) -> list[str]:
+    """Languages anyone in the room picked for translated captions ("ar", "en", ...)."""
+    wanted: set[str] = set()
+    for participant in room.remote_participants.values():
+        for code in participant.attributes.get(CAPTION_LANGUAGE_ATTRIBUTE, "").split(","):
+            code = code.strip().lower()
+            if _LANGUAGE.match(code):
+                wanted.add(code)
+    return sorted(wanted)
 
 
 @dataclass(frozen=True)
@@ -182,32 +199,35 @@ class TrackTranscriber:
                 await self._publish(text, final=False)
 
             elif event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
-                await self._publish(text, final=True)
-                self._store(alt, text)
+                start_ms, end_ms = self._wall_clock_ms(alt)
+                await self._publish(text, final=True, start_ms=start_ms)
+                self._store(alt, text, start_ms, end_ms)
                 self._segment_id = utils.shortuuid("SG_")
                 self._last_interim_text = ""
 
-    async def _publish(self, text: str, *, final: bool) -> None:
+    async def _publish(self, text: str, *, final: bool, start_ms: int | None = None) -> None:
         if not self._room.isconnected():
             return
+        attributes = {
+            ATTRIBUTE_TRANSCRIPTION_SEGMENT_ID: self._segment_id,
+            ATTRIBUTE_TRANSCRIPTION_FINAL: "true" if final else "false",
+            ATTRIBUTE_TRANSCRIPTION_TRACK_ID: self._track_sid,
+        }
+        if start_ms is not None:
+            attributes[ATTRIBUTE_START_MS] = str(start_ms)
         try:
             # A new stream per update, same segment id: viewers replace the line in place.
             writer = await self._room.local_participant.stream_text(
                 topic=TOPIC_TRANSCRIPTION,
                 sender_identity=self._participant.identity,
-                attributes={
-                    ATTRIBUTE_TRANSCRIPTION_SEGMENT_ID: self._segment_id,
-                    ATTRIBUTE_TRANSCRIPTION_FINAL: "true" if final else "false",
-                    ATTRIBUTE_TRANSCRIPTION_TRACK_ID: self._track_sid,
-                },
+                attributes=attributes,
             )
             await writer.write(text)
             await writer.aclose()
         except Exception as e:
             logger.warning("could not publish a caption", extra={"error": str(e)})
 
-    def _store(self, alt: stt.SpeechData, text: str) -> None:
-        start_ms, end_ms = self._wall_clock_ms(alt)
+    def _store(self, alt: stt.SpeechData, text: str, start_ms: int, end_ms: int) -> None:
         self._sink.put(
             {
                 "id": self._segment_id,

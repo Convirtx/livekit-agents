@@ -21,11 +21,16 @@ every tenant on the shared LiveKit project.
    stream and unmuting opens a new one, so Deepgram only runs while someone can talk.
 3. Captions go to everyone in the room as `lk.transcription` text streams sent on behalf
    of the speaker: interim updates and the final text share one `lk.segment_id`, and
-   `lk.transcription_final` marks the final. That is the format `useTranscriptions()` in
-   `@livekit/components-react` reads.
-4. Final segments are queued and posted in batches (every 2 s or 20 segments) to
-   `callback_url` with `Authorization: Bearer <callback_token>`. The site stores each
-   segment once by id, so retries are safe. The STT loop never waits on HTTP.
+   `lk.transcription_final` marks the final. That is the standard LiveKit transcription
+   format. Finals also carry `cx.start_ms` (when the line started), so the site's
+   transcript tab can order live lines with stored ones.
+4. Final segments are queued and posted in batches (every `CAPTIONER_FLUSH_SECONDS`,
+   default 1 s, or 20 segments) to `callback_url` with `Authorization: Bearer
+   <callback_token>`. The site stores each segment once by id, so retries are safe. The STT
+   loop never waits on HTTP.
+5. Each batch also carries `cap_langs`: the caption languages viewers picked (their
+   `cap_lang` participant attribute, comma separated). The site translates new lines into
+   those languages and sends the translations into the room (topic `cx.translation`).
 
 Turning captions off in the session's transcript tab deletes the dispatch and removes the
 agent from the room. LiveKit closes the room after its departure timeout, which ends the job.

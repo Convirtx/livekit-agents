@@ -18,7 +18,7 @@ import os
 
 from livekit.agents import AgentServer, AutoSubscribe, JobContext, JobRequest, cli
 
-from captioner import Dispatch, RoomCaptioner
+from captioner import Dispatch, RoomCaptioner, caption_languages
 from sink import TranscriptSink
 
 logger = logging.getLogger("cx-captioner")
@@ -54,7 +54,12 @@ async def entrypoint(ctx: JobContext) -> None:
     dispatch = Dispatch.parse(ctx.job.metadata, ctx.job.room.name)
     ctx.log_context_fields = {"tenant": dispatch.tenant, "room": dispatch.room, "kind": dispatch.kind}
 
-    sink = TranscriptSink(room=dispatch.room, callback_url=dispatch.callback_url, callback_token=dispatch.callback_token)
+    sink = TranscriptSink(
+        room=dispatch.room,
+        callback_url=dispatch.callback_url,
+        callback_token=dispatch.callback_token,
+        caption_languages=lambda: caption_languages(ctx.room),
+    )
     sink.start()
     captioner = RoomCaptioner(ctx.room, dispatch, sink)
 

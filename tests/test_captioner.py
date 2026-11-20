@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DEEPGRAM_API_KEY", "test")
 
 import sink as sink_module  # noqa: E402
-from captioner import Dispatch, TrackTranscriber, deepgram_language, speaker_user_id  # noqa: E402
+from captioner import Dispatch, TrackTranscriber, caption_languages, deepgram_language, speaker_user_id  # noqa: E402
 from livekit.agents import stt  # noqa: E402
 from sink import TranscriptSink  # noqa: E402
 
@@ -54,6 +54,23 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual("7", speaker_user_id("speaker-Ann-7", {"user_id": "7"}))
         self.assertIsNone(speaker_user_id("agent-AJ_1", {}))
         self.assertIsNone(speaker_user_id("Ann", {"user_id": "drop table"}))
+
+
+class CaptionLanguagesTest(unittest.TestCase):
+    def test_collects_what_viewers_picked(self):
+        class P:
+            def __init__(self, attrs):
+                self.attributes = attrs
+
+        class R:
+            remote_participants = {
+                "a": P({"cap_lang": "ar"}),
+                "b": P({"cap_lang": "en, ar"}),
+                "c": P({}),
+                "d": P({"cap_lang": "<script>"}),
+            }
+
+        self.assertEqual(["ar", "en"], caption_languages(R()))
 
 
 class WallClockTest(unittest.TestCase):
@@ -114,6 +131,15 @@ class SinkTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Bearer 123.abc", auth)
         self.assertEqual("qaf-s10", body["room"])
         self.assertEqual(["SG_0", "SG_1", "SG_2"], [seg["id"] for seg in body["segments"]])
+        self.assertEqual([], body["cap_langs"])
+
+    async def test_sends_the_caption_languages_viewers_want(self):
+        s = TranscriptSink(room="qaf-s10", callback_url=self.url, callback_token="t", caption_languages=lambda: ["en", "ar", "ar"])
+        s.start()
+        s.put({"id": "SG_1", "text": "x"})
+        await s.aclose()
+
+        self.assertEqual(["ar", "en"], self.requests[-1][1]["cap_langs"])
 
     async def test_retries_a_failed_batch(self):
         self.fail_first = 1

@@ -10,24 +10,36 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
+from collections.abc import Callable
 
 import aiohttp
 
 logger = logging.getLogger("cx-captioner.sink")
 
 BATCH_SIZE = 20
-FLUSH_SECONDS = 2.0
+# Translated captions wait for this flush, so keep it short.
+FLUSH_SECONDS = float(os.getenv("CAPTIONER_FLUSH_SECONDS", "1.0"))
 MAX_QUEUED = 2000
 MAX_ATTEMPTS = 4
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 
 class TranscriptSink:
-    def __init__(self, *, room: str, callback_url: str, callback_token: str) -> None:
+    def __init__(
+        self,
+        *,
+        room: str,
+        callback_url: str,
+        callback_token: str,
+        caption_languages: Callable[[], list[str]] | None = None,
+    ) -> None:
         self._room = room
         self._url = callback_url
         self._token = callback_token
+        # Languages viewers picked for their captions; the site translates new lines into them.
+        self._caption_languages = caption_languages or (lambda: [])
         self._queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=MAX_QUEUED)
         self._session: aiohttp.ClientSession | None = None
         self._task: asyncio.Task[None] | None = None
@@ -78,9 +90,16 @@ class TranscriptSink:
                     break
             await self._send(batch, attempts=MAX_ATTEMPTS)
 
+    def _languages(self) -> list[str]:
+        try:
+            return sorted(set(self._caption_languages()))[:10]
+        except Exception:
+            logger.exception("could not read caption languages")
+            return []
+
     async def _send(self, batch: list[dict], *, attempts: int) -> None:
         assert self._session is not None
-        body = {"room": self._room, "segments": batch}
+        body = {"room": self._room, "segments": batch, "cap_langs": self._languages()}
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
 
         for attempt in range(1, attempts + 1):
